@@ -1,0 +1,1 @@
+uv run -m scripts.gen_label

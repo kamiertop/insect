@@ -1,0 +1,19 @@
+build/
+dist/
+wheels/
+*.egg-info
+
+
+.pytest_cache
+
+**/__pycache__/
+**/*.py[oc]
+
+# Virtual environments
+.venv
+**/.idea/
+
+**/.DS_Store/
+
+data/datasets/
+data/label.csv
