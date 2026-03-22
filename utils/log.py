@@ -1,9 +1,10 @@
 import os
 import sys
+
 from loguru import logger
 
 
-def init_logger() -> None:
+def init_logger(log_dir: str = "./logs") -> None:
     """
     Central loguru configuration.
     Call this once, as early as possible (program entry).
@@ -12,16 +13,15 @@ def init_logger() -> None:
     logger.remove()
 
     level = os.getenv("LOG_LEVEL", "INFO").upper()
-    log_dir = os.getenv("LOG_DIR", "./logs")
     log_file = os.path.join(log_dir, "app.log")
 
     # Console sink
     logger.add(
         sys.stderr,
         level=level,
-        enqueue=True,   # safer with threads/processes
+        enqueue=True,  # safer with threads/processes
         backtrace=False,
-        diagnose=False, # set True only for debugging (can leak data)
+        diagnose=False,  # set True only for debugging (can leak data)
         format=(
             "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
             "<level>{level: <8}</level> | "

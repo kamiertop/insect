@@ -5,9 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "ipykernel>=7.2.0",
     "loguru>=0.7.3",
+    "path>=17.1.1",
     "polars>=1.39.0",
     "pydantic>=2.12.5",
+    "torch>=2.10.0",
 ]
 
 [dependency-groups]
@@ -15,3 +18,13 @@ dev = [
     "pytest>=9.0.2",
 ]
 
+
+[tool.uv.sources]
+torch = [
+  {index = "pytorch-cu126", marker = "platform_system != 'Darwin' "}
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

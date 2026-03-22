@@ -17,3 +17,6 @@ wheels/
 
 data/datasets/
 data/label.csv
+scripts/summary.ipynb
+*.log
+logs
