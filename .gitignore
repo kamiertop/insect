@@ -20,3 +20,5 @@ data/label.csv
 scripts/summary.ipynb
 *.log
 logs
+
+test

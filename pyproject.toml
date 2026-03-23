@@ -7,7 +7,9 @@ requires-python = ">=3.13"
 dependencies = [
     "ipykernel>=7.2.0",
     "loguru>=0.7.3",
+    "numpy>=2.4.3",
     "path>=17.1.1",
+    "pillow>=12.1.1",
     "polars>=1.39.0",
     "pydantic>=2.12.5",
     "torch>=2.10.0",
