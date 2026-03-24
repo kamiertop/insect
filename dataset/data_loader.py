@@ -7,8 +7,6 @@ from PIL import Image
 from pydantic import BaseModel
 from torch.utils.data import Dataset, DataLoader
 
-from utils import Config
-
 
 class DataItem(BaseModel):
     order: str  # 目
@@ -29,16 +27,24 @@ class InsectDataset(Dataset):
         class_num: 有多少类别，支持通过order_name指定‘目’
     """
 
-    def __init__(self, config: Config, split: str = 'train', transform: Callable = None):
-
+    def __init__(self, split_path: str | Path, split: str = 'train', transform: Callable = None):
         assert split in ['train', 'val', 'test']
         self.transform = transform
-        self.dataset_path: str = config.datasets_path
-        self.df: pl.DataFrame = pl.read_csv(Path(config.data_root) / f"{split}.csv")
+        split_path = Path(split_path)
+        if not split_path.exists():
+            raise FileNotFoundError(f"Split file not found: {split_path}")
+
+        full_df: pl.DataFrame = pl.read_csv(split_path)
+        required_cols = {"split", "path", "label", "group_id"}
+        missing_cols = required_cols - set(full_df.columns)
+        if missing_cols:
+            raise ValueError(f"Split file missing required columns: {sorted(missing_cols)}")
+
+        self.df = full_df.filter(pl.col("split") == split)
         self.data: list = []
 
         if self.df.height == 0:
-            raise ValueError(f"{split} has no rows")
+            raise ValueError(f"split '{split}' has no rows in {split_path}")
 
         classes: list[str] = self.df.select("label").drop_nulls().unique().to_series().to_list()
         self.class_to_idx: dict[str, int] = {}
@@ -70,3 +76,4 @@ def build_dataloader(dataset: InsectDataset, shuffle=False, batch_size=32, num_w
     return DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=torch.cuda.is_initialized()
     )
+

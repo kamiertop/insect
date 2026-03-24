@@ -1,21 +1,58 @@
-import argparse
 import random
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+import typer
 from loguru import logger
 from torchvision import transforms
 
-from data.data_loader import InsectDataset, build_dataloader
+from dataset.data_loader import InsectDataset, build_dataloader
 from model.model import get_insect_model
-from utils import Config, init_logger
+from utils import init_logger
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train insect image classifier")
-    parser.add_argument("--config", type=str, default="./config.toml", help="Path to config.toml")
-    return parser.parse_args()
+@dataclass
+class TrainArgs:
+    data_root: str = "./artifacts/data"
+    log_dir: str = "./artifacts/logs"
+    split_id: str = ""
+    epochs: int = 10
+    batch_size: int = 16
+    num_workers: int = 2
+    lr: float = 1e-4
+    weight_decay: float = 1e-4
+    seed: int = 42
+    max_train_steps: int = 0
+    max_val_steps: int = 0
+    fine_tune: bool = False
+    early_stop_enabled: bool = True
+    early_stop_patience: int = 5
+    early_stop_min_delta: float = 0.0
+
+
+app = typer.Typer(add_completion=False, help="训练脚本，执行前需要先生成标签切分文件")
+
+
+def active_split_marker_path(data_root: str) -> Path:
+    return Path(data_root) / "active_split.txt"
+
+
+def resolve_active_split(data_root: str, split_id: str) -> str:
+    # Priority: explicit --split-id > marker file > default.
+    if split_id.strip():
+        return split_id.strip()
+    marker = active_split_marker_path(data_root)
+    if marker.exists():
+        value = marker.read_text(encoding="utf-8").strip()
+        if value:
+            return value
+    return "default"
+
+
+def resolve_split_path(data_root: str, split_id: str) -> Path:
+    return Path(data_root) / "splits" / split_id / "split.csv"
 
 
 def init_device() -> torch.device:
@@ -174,14 +211,13 @@ def save_checkpoint(
     )
 
 
-def train(cfg: Config, device: torch.device) -> None:
-    train_cfg = cfg.train
-    train_ds = InsectDataset(config=cfg, split="train", transform=build_train_transform())
-    val_ds = InsectDataset(config=cfg, split="val", transform=build_eval_transform())
+def train(args: TrainArgs, device: torch.device, split_path: Path) -> None:
+    train_ds = InsectDataset(split_path=split_path, split="train", transform=build_train_transform())
+    val_ds = InsectDataset(split_path=split_path, split="val", transform=build_eval_transform())
     align_val_mapping(train_ds, val_ds)
 
     if len(train_ds) == 0 or len(val_ds) == 0:
-        raise ValueError("train.csv or val.csv is empty, cannot run training")
+        raise ValueError("split file has empty train or val split, cannot run training")
 
     if train_ds.num_classes < 2:
         raise ValueError(f"Need at least 2 classes to train, got {train_ds.num_classes}")
@@ -189,27 +225,28 @@ def train(cfg: Config, device: torch.device) -> None:
     train_loader = build_dataloader(
         dataset=train_ds,
         shuffle=True,
-        batch_size=train_cfg.batch_size,
-        num_workers=train_cfg.num_workers,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
     )
     logger.info("build train dataloader done")
     val_loader = build_dataloader(
         dataset=val_ds,
         shuffle=False,
-        batch_size=train_cfg.batch_size,
-        num_workers=train_cfg.num_workers,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
     )
     logger.info("build val dataloader done")
-    model = get_insect_model(num_classes=train_ds.num_classes, fine_tune=train_cfg.fine_tune).to(device)
+    model = get_insect_model(num_classes=train_ds.num_classes, fine_tune=args.fine_tune).to(device)
     logger.info("build insect model done")
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
-        lr=train_cfg.lr,
-        weight_decay=train_cfg.weight_decay,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
     )
 
-    save_dir = Path(train_cfg.save_dir)
+    # 训练权重固定输出到统一目录，便于集中管理。
+    save_dir = Path(args.data_root).parent / "checkpoints"
     save_dir.mkdir(parents=True, exist_ok=True)
     best_path = save_dir / "best.pt"
     last_path = save_dir / "last.pt"
@@ -220,7 +257,7 @@ def train(cfg: Config, device: torch.device) -> None:
     best_val_acc = -1.0
     no_improve_epochs = 0
     total_elapsed_sec = 0.0
-    for epoch in range(1, train_cfg.epochs + 1):
+    for epoch in range(1, args.epochs + 1):
         epoch_start = time.perf_counter()
         train_loss, train_acc = run_train_epoch(
             model=model,
@@ -229,7 +266,7 @@ def train(cfg: Config, device: torch.device) -> None:
             optimizer=optimizer,
             device=device,
             num_classes=train_ds.num_classes,
-            max_steps=train_cfg.max_train_steps,
+            max_steps=args.max_train_steps,
         )
         val_loss, val_acc = run_val_epoch(
             model=model,
@@ -237,19 +274,19 @@ def train(cfg: Config, device: torch.device) -> None:
             criterion=criterion,
             device=device,
             num_classes=train_ds.num_classes,
-            max_steps=train_cfg.max_val_steps,
+            max_steps=args.max_val_steps,
         )
         epoch_elapsed_sec = time.perf_counter() - epoch_start
         total_elapsed_sec += epoch_elapsed_sec
 
         logger.info(
-            f"epoch={epoch}/{train_cfg.epochs} "
+            f"epoch={epoch}/{args.epochs} "
             f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
             f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} "
             f"epoch_time={epoch_elapsed_sec:.2f}s total_time={total_elapsed_sec:.2f}s"
         )
 
-        improved = val_acc > (best_val_acc + train_cfg.early_stopping.min_delta)
+        improved = val_acc > (best_val_acc + args.early_stop_min_delta)
         if improved:
             best_val_acc = val_acc
             no_improve_epochs = 0
@@ -276,12 +313,12 @@ def train(cfg: Config, device: torch.device) -> None:
             )
             logger.success(f"New best model saved: {best_path} (val_acc={best_val_acc:.4f})")
 
-        if train_cfg.early_stopping.enabled:
+        if args.early_stop_enabled:
             logger.info(
-                f"early_stopping status: no_improve={no_improve_epochs}/{train_cfg.early_stopping.patience} "
-                f"min_delta={train_cfg.early_stopping.min_delta}"
+                f"early_stopping status: no_improve={no_improve_epochs}/{args.early_stop_patience} "
+                f"min_delta={args.early_stop_min_delta}"
             )
-            if no_improve_epochs >= train_cfg.early_stopping.patience:
+            if no_improve_epochs >= args.early_stop_patience:
                 logger.warning(
                     f"Early stopping triggered at epoch {epoch}: "
                     f"no improvement for {no_improve_epochs} epochs"
@@ -291,19 +328,66 @@ def train(cfg: Config, device: torch.device) -> None:
     logger.info(f"Training done. last={last_path} best={best_path} best_val_acc={best_val_acc:.4f}")
 
 
-def main() -> None:
-    args = parse_args()
-    cfg = Config.parse(args.config)
-    init_logger(cfg.log_dir)
-    set_seed(cfg.train.seed)
+@app.command()
+def main(
+        data_root: str = typer.Option("./artifacts/data", help="产物数据根目录"),
+        log_dir: str = typer.Option("./artifacts/logs", help="日志输出目录"),
+        split_id: str = typer.Option("", help="切分版本 ID，留空则从 active_split.txt 读取"),
+        epochs: int = typer.Option(10, help="训练总轮数"),
+        batch_size: int = typer.Option(16, help="训练批大小"),
+        num_workers: int = typer.Option(2, help="DataLoader 的 worker 数"),
+        lr: float = typer.Option(1e-4, help="优化器学习率"),
+        weight_decay: float = typer.Option(1e-4, help="权重衰减系数"),
+        seed: int = typer.Option(42, help="随机种子"),
+        max_train_steps: int = typer.Option(0, help="单轮训练最多步数，0 表示跑完整个 epoch"),
+        max_val_steps: int = typer.Option(0, help="单轮验证最多步数，0 表示跑完整个验证集"),
+        fine_tune: bool = typer.Option(False, "--fine-tune/--no-fine-tune", help="是否启用微调（解冻部分骨干网络）"),
+        early_stop_enabled: bool = typer.Option(True, "--early-stop-enabled/--no-early-stop-enabled", help="是否启用早停"),
+        early_stop_patience: int = typer.Option(5, help="早停容忍轮数（连续多少轮无提升后停止）"),
+        early_stop_min_delta: float = typer.Option(0.0, help="判定为提升所需的最小增量"),
+) -> None:
+    args = TrainArgs(
+        data_root=data_root,
+        log_dir=log_dir,
+        split_id=split_id,
+        epochs=epochs,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        lr=lr,
+        weight_decay=weight_decay,
+        seed=seed,
+        max_train_steps=max_train_steps,
+        max_val_steps=max_val_steps,
+        fine_tune=fine_tune,
+        early_stop_enabled=early_stop_enabled,
+        early_stop_patience=early_stop_patience,
+        early_stop_min_delta=early_stop_min_delta,
+    )
+
+    init_logger(args.log_dir)
+
+    resolved_split_id = resolve_active_split(args.data_root, args.split_id)
+    resolved_split_path = resolve_split_path(args.data_root, resolved_split_id)
+    checkpoint_dir = Path(args.data_root).parent / "checkpoints"
+    eval_dir = Path(args.data_root).parent / "eval"
+    logger.info(f"checkpoint_dir={checkpoint_dir}")
+    logger.info(f"eval_dir_hint={eval_dir}")
+
+    set_seed(args.seed)
     device = init_device()
     logger.info(f"Device={device}, torch version={torch.__version__}")
-    logger.info(f"Training config: {cfg.train.model_dump()}")
+    logger.info(
+        "Training args: "
+        f"epochs={args.epochs} batch_size={args.batch_size} num_workers={args.num_workers} "
+        f"lr={args.lr} weight_decay={args.weight_decay} fine_tune={args.fine_tune} "
+        f"early_stop={args.early_stop_enabled} patience={args.early_stop_patience}"
+    )
+    logger.info(f"Using split: id={resolved_split_id} path={resolved_split_path}")
 
-    train(cfg=cfg, device=device)
+    train(args=args, device=device, split_path=resolved_split_path)
 
     return None
 
 
 if __name__ == "__main__":
-    main()
+    app()

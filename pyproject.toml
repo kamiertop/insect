@@ -12,6 +12,7 @@ dependencies = [
     "pillow>=12.1.1",
     "polars>=1.39.0",
     "torchvision>=0.25.0",
+    "typer>=0.16.0",
     "pydantic>=2.12.5",
     "torch>=2.10.0",
 ]

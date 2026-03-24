@@ -4,21 +4,21 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 import polars as pl
+import typer
 
-from data.data_loader import DataItem
-from utils import Config
+from dataset.data_loader import DataItem
+
+app = typer.Typer(add_completion=False, help="扫描数据集并生成 label.csv")
 
 
-def gen_label() -> None:
+def gen_label(datasets_path: str, data_root: str) -> None:
     """
     处理数据集，生成标签文件 "label.csv"
     """
-    config = Config.parse()
-
     items: list[DataItem] = []
 
-    # 纲
-    fs_class = Path(config.datasets_path)
+    # 按 目/科/属/种/性别(or标本) 的目录层级收集图片并构建标签表。
+    fs_class = Path(datasets_path)
 
     for order in fs_class.iterdir():  # 目
         for family in order.iterdir():  # 科
@@ -59,7 +59,8 @@ def gen_label() -> None:
 
     df: pl.DataFrame = pl.DataFrame(items)
 
-    out_path = Path(config.data_root) / "label.csv"
+    out_path = Path(data_root) / "label.csv"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     df.write_csv(out_path)
 
     print(f"output path: {out_path}")
@@ -67,7 +68,16 @@ def gen_label() -> None:
     return None
 
 
-if __name__ == "__main__":
+@app.command()
+def main(
+    datasets_path: str = typer.Option("./data/datasets/昆虫纲", help="原始数据集目录"),
+    data_root: str = typer.Option("./artifacts/data", help="产物数据根目录"),
+) -> None:
     print("处理数据集，生成标签文件...")
-    gen_label()
+    gen_label(datasets_path=datasets_path, data_root=data_root)
     print("处理完成，标签生成完成")
+
+
+if __name__ == "__main__":
+    app()
+

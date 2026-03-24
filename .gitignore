@@ -15,13 +15,15 @@ wheels/
 
 **/.DS_Store/
 
-data/datasets/
-data/label.csv
 scripts/summary.ipynb
+
 *.log
 **/logs/
 
 test
 
-*.csv
-*.pt
+archive/
+
+# Generated artifacts
+artifacts/
+

@@ -1,13 +1,16 @@
-import argparse
 import random
+from pathlib import Path
 
 import torch
+import typer
 from loguru import logger
 from torchvision import transforms
 
-from data.data_loader import InsectDataset, build_dataloader
+from dataset.data_loader import InsectDataset, build_dataloader
 from model.model import get_insect_model
-from utils import Config, init_logger
+from utils import init_logger
+
+app = typer.Typer(add_completion=False, help="单轮 smoke 训练脚本")
 
 
 def init_device() -> torch.device:
@@ -33,16 +36,16 @@ def build_train_transform() -> transforms.Compose:
 
 def train_one_epoch(
 	device: torch.device,
+	split_path: str,
 	lr: float,
 	batch_size: int,
 	num_workers: int,
 	fine_tune: bool,
 	max_steps: int,
 ) -> None:
-	cfg = Config.parse()
-	dataset = InsectDataset(config=cfg, split="train", transform=build_train_transform())
+	dataset = InsectDataset(split_path=split_path, split="train", transform=build_train_transform())
 	if len(dataset) == 0:
-		raise ValueError("train.csv is empty, cannot run training")
+		raise ValueError("train split is empty in split.csv, cannot run training")
 
 	num_classes = len(dataset.class_to_idx)
 	if num_classes < 2:
@@ -108,32 +111,42 @@ def train_one_epoch(
 	logger.success(f"Epoch done | loss={epoch_loss:.4f} acc={epoch_acc:.4f} seen={running_total}")
 
 
-def main() -> None:
-	parser = argparse.ArgumentParser(description="Run one epoch training smoke test")
-	parser.add_argument("--seed", type=int, default=42)
-	parser.add_argument("--lr", type=float, default=1e-4)
-	parser.add_argument("--batch-size", type=int, default=16)
-	parser.add_argument("--num-workers", type=int, default=2)
-	parser.add_argument("--fine-tune", action="store_true", help="Enable partial fine-tuning")
-	parser.add_argument("--max-steps", type=int, default=0, help="0 means full epoch")
-	args = parser.parse_args()
+@app.command()
+def main(
+		data_root: str = typer.Option("./artifacts/data", help="产物数据根目录"),
+		log_dir: str = typer.Option("./artifacts/logs", help="日志输出目录"),
+		split_id: str = typer.Option("", help="切分版本 ID，留空则从 active_split.txt 读取"),
+		seed: int = typer.Option(42, help="随机种子"),
+		lr: float = typer.Option(1e-4, help="学习率"),
+		batch_size: int = typer.Option(16, help="批大小"),
+		num_workers: int = typer.Option(2, help="DataLoader 的 worker 数"),
+		fine_tune: bool = typer.Option(False, "--fine-tune/--no-fine-tune", help="是否启用微调"),
+		max_steps: int = typer.Option(0, help="最多训练步数，0 表示完整 epoch"),
+) -> None:
 
-	cfg = Config.parse()
-	init_logger(cfg.log_dir)
-	set_seed(args.seed)
+	# Priority: explicit --split-id > marker file > default.
+	marker = Path(data_root) / "active_split.txt"
+	resolved_split_id = split_id.strip() or (marker.read_text(encoding="utf-8").strip() if marker.exists() else "default")
+	if not resolved_split_id:
+		resolved_split_id = "default"
+	resolved_split_path = Path(data_root) / "splits" / resolved_split_id / "split.csv"
+
+	init_logger(log_dir)
+	set_seed(seed)
 	device = init_device()
 	logger.info(f"Torch={torch.__version__} | device={device}")
 
 	train_one_epoch(
 		device=device,
-		lr=args.lr,
-		batch_size=args.batch_size,
-		num_workers=args.num_workers,
-		fine_tune=args.fine_tune,
-		max_steps=args.max_steps,
+		split_path=str(resolved_split_path),
+		lr=lr,
+		batch_size=batch_size,
+		num_workers=num_workers,
+		fine_tune=fine_tune,
+		max_steps=max_steps,
 	)
 
 
 if __name__ == "__main__":
-	main()
+	app()
 

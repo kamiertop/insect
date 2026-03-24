@@ -1,11 +1,16 @@
-import argparse
+import json
 import random
+from datetime import datetime
 from pathlib import Path
 
 import polars as pl
+import typer
 from loguru import logger
 
-from utils import Config, init_logger
+from utils import init_logger
+
+
+app = typer.Typer(add_completion=False, help="从 label.csv 生成 split 索引文件")
 
 
 class DivideRatio:
@@ -34,7 +39,11 @@ class DivideRatio:
         Returns:
             A tuple of (n_train, n_val, n_test) representing the number of groups for training, validation, and testing.
         """
-        assert self._sum() == 1.0
+        # 浮点比例允许微小误差，避免 0.1+0.2 这类精度问题导致误判。
+        if abs(self._sum() - 1.0) > 1e-8:
+            raise ValueError(
+                f"Invalid split ratio: train+val+test must equal 1.0, got {self._sum():.8f}"
+            )
 
         # 至少保证有训练样本
         if n_groups <= 1:
@@ -60,19 +69,24 @@ class DivideRatio:
 
 def gen_index(ratio: DivideRatio = DivideRatio(0.8, 0.1, 0.1),
               order_name: str = "",
-              seed: int = 42
+              seed: int = 42,
+              split_id: str = "",
+              activate: bool = False,
+              data_root: str = "./artifacts/data",
               ) -> None:
     """
-    从 label.csv 生成 train.csv, val.csv, test.csv
+    从 label.csv 生成 split.csv, 包含每个样本所属的 split(train/val/test)切分时按物种(label)分层，保证每个 split 内的类别分布相似；
+    同一 group_id 的样本会被分配到同一 split，避免数据泄漏。
     Args:
         order_name: 指定‘目’，如果不指定，则使用全部数据
         ratio: 训练集，验证集，测试集的比例，默认 8:1:1
         seed: 随机数种子
+        split_id: 切分版本标识，为空时使用 active_split 或 default
+        activate: 是否将本次 split_id 写入 active_split 标记文件
     """
     # 固定随机种子，保证每次切分可复现
     rng = random.Random(seed)
-    cfg = Config.parse()
-    label_path = Path(cfg.data_root) / "label.csv"
+    label_path = Path(data_root) / "label.csv"
     # 读取标签文件，后续所有切分都基于该文件展开
     if not label_path.exists():
         logger.error(f"No label file found at {label_path}, please generate by exec: uv run -m scripts.gen_label")
@@ -120,68 +134,71 @@ def gen_index(ratio: DivideRatio = DivideRatio(0.8, 0.1, 0.1),
     if full_df["split"].null_count() > 0:
         raise RuntimeError("Found rows without split assignment.")
 
-    # 基于 split 字段切出三个集合，且保留所有原始列
-    train_df = full_df.filter(pl.col("split") == "train")
-    val_df = full_df.filter(pl.col("split") == "val")
-    test_df = full_df.filter(pl.col("split") == "test")
+    marker_path = Path(data_root) / "active_split.txt"
+    marker_value = marker_path.read_text(encoding="utf-8").strip() if marker_path.exists() else ""
+    resolved_split_id = split_id.strip() if split_id else marker_value
+    if resolved_split_id == "":
+        resolved_split_id = "default"
 
-    data_root = Path(cfg.data_root)
-    split_path = data_root / "split.csv"
-    train_path = data_root / "train.csv"
-    val_path = data_root / "val.csv"
-    test_path = data_root / "test.csv"
+    split_path = Path(data_root) / "splits" / resolved_split_id / "split.csv"
+    split_path.parent.mkdir(parents=True, exist_ok=True)
 
     # split.csv 作为总清单；train/val/test 为下游训练直接使用文件
     full_df.write_csv(split_path)
-    train_df.write_csv(train_path)
-    val_df.write_csv(val_path)
-    test_df.write_csv(test_path)
+
+    meta_path = split_path.parent / "meta.json"
+    meta_path.write_text(
+        json.dumps(
+            {
+                "split_id": resolved_split_id,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "seed": seed,
+                "order": order_name,
+                "ratio": {"train": ratio.train, "val": ratio.val, "test": ratio.test},
+                "rows": full_df.height,
+                "label_path": str(label_path),
+                "split_path": str(split_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    if activate:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(resolved_split_id, encoding="utf-8")
+        logger.info(f"active split updated: {resolved_split_id} -> {marker_path}")
 
     logger.info(f"split saved: {split_path}")
-    logger.info(f"train saved: {train_path}, rows={train_df.height}")
-    logger.info(f"val saved:   {val_path}, rows={val_df.height}")
-    logger.info(f"test saved:  {test_path}, rows={test_df.height}")
+    logger.info(f"meta saved: {meta_path}")
 
     return None
 
 
+@app.command()
+def main(
+    data_root: str = typer.Option("./artifacts/data", help="产物数据根目录"),
+    log_dir: str = typer.Option("./artifacts/logs", help="日志输出目录"),
+    order: str = typer.Option("", help="指定目名称，如 直翅目；为空则使用全量数据"),
+    train: float = typer.Option(0.8, help="训练集比例"),
+    val: float = typer.Option(0.1, help="验证集比例"),
+    test: float = typer.Option(0.1, help="测试集比例"),
+    seed: int = typer.Option(42, help="随机种子"),
+    split_id: str = typer.Option("", help="切分版本 ID，留空则读取 active_split.txt"),
+    activate: bool = typer.Option(False, "--activate/--no-activate", help="是否将本次切分写为当前激活版本"),
+) -> None:
+    init_logger(log_dir)
+    gen_index(
+        ratio=DivideRatio(train=train, val=val, test=test),
+        order_name=order,
+        seed=seed,
+        split_id=split_id,
+        activate=activate,
+        data_root=data_root,
+    )
+
+
 if __name__ == "__main__":
-    init_logger()
-    
-    # 从命令行读取 order_name，不指定时默认使用全部数据
-    parser = argparse.ArgumentParser(description="从 label.csv 生成 train/val/test 索引文件")
-    parser.add_argument(
-        "--order", "-o",
-        type=str,
-        default="",
-        help="指定'目'名称，如'直翅目'；不指定时使用全部数据"
-    )
-    parser.add_argument(
-        "--train",
-        type=float,
-        default=0.8,
-        help="训练集比例，默认 0.8"
-    )
-    parser.add_argument(
-        "--val",
-        type=float,
-        default=0.1,
-        help="验证集比例，默认 0.1"
-    )
-    parser.add_argument(
-        "--test",
-        type=float,
-        default=0.1,
-        help="测试集比例，默认 0.1"
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="随机种子，默认 42，用于可复现性"
-    )
-    
-    args = parser.parse_args()
-    
-    ratio = DivideRatio(train=args.train, val=args.val, test=args.test)
-    gen_index(ratio=ratio, order_name=args.order, seed=args.seed)
+    app()
+
