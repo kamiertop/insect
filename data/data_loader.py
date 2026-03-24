@@ -52,6 +52,10 @@ class InsectDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+    @property
+    def num_classes(self) -> int:
+        return len(self.class_to_idx)
+
     def __getitem__(self, index: int):
         row: dict = self.samples[index]
         img = Image.open(row["path"]).convert("RGB")
